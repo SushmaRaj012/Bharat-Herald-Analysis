@@ -1,0 +1,320 @@
+-- Business Request – 1: Monthly Circulation Drop Check -- 
+
+WITH city AS (
+  SELECT
+      s.City_ID,
+      c.city AS City,
+      s.Net_Circulation,
+
+      /* Parse common text month formats to a real DATE */
+      COALESCE(
+        STR_TO_DATE(TRIM(s.formatted_month), '%d %M %Y'),      -- e.g., '01 November 2023'
+        STR_TO_DATE(TRIM(s.formatted_month), '%d %b %Y'),      -- e.g., '01 Nov 2023'
+        STR_TO_DATE(CONCAT('01 ', TRIM(s.formatted_month)), '%d %M %Y'),  -- e.g., 'November 2023'
+        STR_TO_DATE(CONCAT(TRIM(s.formatted_month), '-01'), '%Y-%m-%d')   -- e.g., '2023-11'
+      ) AS month_date
+
+  FROM bharat_herald.fact_print_sales AS s
+  LEFT JOIN bharat_herald.dim_city AS c
+    ON s.City_ID = c.dim_city_id
+),
+x AS (
+  SELECT
+      City_ID,
+      City,
+      DATE_FORMAT(month_date, '%b-%Y') AS Month_Year,
+      Net_Circulation,
+      LAG(Net_Circulation) OVER (
+        PARTITION BY City_ID
+        ORDER BY month_date   -- ensures March → Feb, Jan → Dec
+      ) AS prev_net
+  FROM City
+),
+d AS (
+  SELECT *,
+         CASE
+           WHEN prev_net IS NULL OR Net_Circulation >= prev_net THEN 0
+           ELSE prev_net - Net_Circulation
+         END AS drop_amt
+  FROM x
+)
+SELECT *, ROUND( (prev_net - Net_Circulation)/prev_net * 100, 2 ) AS drop_pct
+FROM d
+WHERE drop_amt > 1
+ORDER BY drop_amt DESC
+LIMIT 5;
+
+-- Business Request – 2: Yearly Revenue Concentration by Category
+-- There are no ad category revenue that has reached upto 50% 
+
+SELECT * FROM bharat_herald.fact_ad_revenue;
+
+WITH agg AS (
+SELECT
+  YEAR(f.`Date`) AS year,
+  COALESCE(d.standard_ad_category, 'Unmapped') AS category_name,
+  SUM(f.ad_revenue_in_inr) AS category_revenue
+FROM bharat_herald.fact_ad_revenue AS f
+LEFT JOIN bharat_herald.dim_ad_category AS d
+  ON f.ad_category = d.dim_ad_category_id
+GROUP BY YEAR(f.`Date`), category_name
+ORDER BY year, category_revenue DESC
+),
+with_pct AS (
+  SELECT
+    year,
+    category_name,
+    category_revenue,
+    SUM(category_revenue) OVER (PARTITION BY year) AS total_revenue_year,
+    ROUND(category_revenue / SUM(category_revenue) OVER (PARTITION BY year) * 100, 2) AS pct_of_year_total
+  FROM agg
+)
+SELECT
+  year,
+  category_name,
+  category_revenue,
+  total_revenue_year,
+  pct_of_year_total
+FROM with_pct
+WHERE pct_of_year_total > 30
+ORDER BY pct_of_year_total DESC;
+
+
+-- Business Request – 3: 2024 Print Efficiency Leaderboard
+SELECT * FROM bharat_herald.fact_print_sales;
+
+WITH city_data AS (
+  SELECT 
+    c.city,
+    SUM(f.`Copies Sold`) + sum(f.copies_returned) AS copies_printed_2024,
+    SUM(f.`Net_Circulation`) AS net_circulation_2024
+  FROM bharat_herald.fact_print_sales f
+  JOIN bharat_herald.dim_city c   -- join if you have a dimension table
+    ON f.City_ID = c.dim_city_id
+  WHERE YEAR(f.formatted_month) = 2024
+  GROUP BY c.city
+),
+ranked AS (
+  SELECT
+    city,
+    copies_printed_2024,
+    net_circulation_2024,
+    ROUND((net_circulation_2024 / copies_printed_2024 *100), 2) AS efficiency_ratio,
+    RANK() OVER (ORDER BY net_circulation_2024 / copies_printed_2024 DESC) AS efficiency_rank_2024
+  FROM city_data
+)
+SELECT *
+FROM ranked
+WHERE efficiency_rank_2024 <= 5
+ORDER BY efficiency_rank_2024;
+
+
+-- Business Request – 4 : Internet Readiness Growth (2021)
+WITH by_city AS (
+  SELECT
+    COALESCE(c.city, f.city_id) AS city_name,
+    MAX(CASE WHEN YEAR(f.`Date`) = 2021 AND f.quarter = 'Q1'
+             THEN f.internet_penetration END) AS internet_q1,
+    MAX(CASE WHEN YEAR(f.`Date`) = 2021 AND f.quarter = 'Q4'
+             THEN f.internet_penetration END) AS internet_q4
+  FROM bharat_herald.fact_city_readiness AS f
+  LEFT JOIN bharat_herald.dim_city AS c
+    ON c.dim_city_id = f.city_id
+  GROUP BY city_name
+),
+with_delta AS (
+  SELECT
+    city_name,
+    internet_q1,
+    internet_q4,
+    ROUND(internet_q4 - internet_q1, 2) AS Internet_Reach_rate
+  FROM by_city
+)
+SELECT
+  city_name,
+  internet_q1,
+  internet_q4,
+  Internet_Reach_rate
+  -- If you want the rank back, uncomment below:
+  -- ,RANK() OVER (ORDER BY Internet_Reach_rate DESC) AS improvement_rank
+FROM with_delta
+WHERE internet_q1 IS NOT NULL
+  AND internet_q4 IS NOT NULL
+ORDER BY Internet_Reach_rate DESC;
+
+
+-- Business Request – 5: Consistent Multi-Year Decline (2019→2024) 
+WITH
+-- map edition -> city
+map_edition_city AS (
+  SELECT DISTINCT edition_id, City_ID
+  FROM bharat_herald.fact_print_sales
+),
+
+-- PRINT: city × year
+print_yearly AS (
+  SELECT
+      f.City_ID,
+      YEAR(f.formatted_month) AS year,
+      SUM(f.Net_Circulation)  AS yearly_net_circulation
+  FROM bharat_herald.fact_print_sales f
+  WHERE YEAR(f.formatted_month) BETWEEN 2019 AND 2024
+  GROUP BY f.City_ID, YEAR(f.formatted_month)
+),
+
+-- AD: aggregate to edition × year, then roll up to city × year
+ad_yearly_city AS (
+  SELECT
+      mec.City_ID,
+      CAST(SUBSTRING_INDEX(a.quarter_Year,'-',1) AS UNSIGNED) AS year,
+      SUM(a.ad_revenue_in_inr) AS yearly_ad_revenue
+  FROM bharat_herald.fact_ad_revenue a
+  JOIN map_edition_city mec
+    ON mec.edition_id = a.edition_id
+  WHERE CAST(SUBSTRING_INDEX(a.quarter_Year,'-',1) AS UNSIGNED) BETWEEN 2019 AND 2024
+  GROUP BY mec.City_ID, CAST(SUBSTRING_INDEX(a.quarter_Year,'-',1) AS UNSIGNED)
+),
+
+-- combine to get city × year totals
+yearly AS (
+  SELECT
+      c.city AS city_name,
+      py.year,
+      py.yearly_net_circulation,
+      COALESCE(ay.yearly_ad_revenue, 0) AS yearly_ad_revenue
+  FROM print_yearly py
+  LEFT JOIN ad_yearly_city ay
+    ON ay.City_ID = py.City_ID AND ay.year = py.year
+  LEFT JOIN bharat_herald.dim_city c
+    ON c.dim_city_id = py.City_ID
+),
+
+-- year-over-year flags per city-year
+flags AS (
+  SELECT
+    city_name,
+    year,
+    CASE WHEN LAG(yearly_net_circulation) OVER (PARTITION BY city_name ORDER BY year)
+              > yearly_net_circulation THEN 'Yes' ELSE 'No' END AS is_declining_print,
+    CASE WHEN LAG(yearly_ad_revenue) OVER (PARTITION BY city_name ORDER BY year)
+              > yearly_ad_revenue      THEN 'Yes' ELSE 'No' END AS is_declining_ad_revenue
+  FROM yearly
+),
+
+-- pivot flags to one row per city (2020–2024 only)
+pivot AS (
+  SELECT 
+    city_name,
+    MAX(CASE WHEN year=2020 THEN is_declining_print        END) AS print_down_2020,
+    MAX(CASE WHEN year=2021 THEN is_declining_print        END) AS print_down_2021,
+    MAX(CASE WHEN year=2022 THEN is_declining_print        END) AS print_down_2022,
+    MAX(CASE WHEN year=2023 THEN is_declining_print        END) AS print_down_2023,
+    MAX(CASE WHEN year=2024 THEN is_declining_print        END) AS print_down_2024,
+
+    MAX(CASE WHEN year=2020 THEN is_declining_ad_revenue   END) AS ad_down_2020,
+    MAX(CASE WHEN year=2021 THEN is_declining_ad_revenue   END) AS ad_down_2021,
+    MAX(CASE WHEN year=2022 THEN is_declining_ad_revenue   END) AS ad_down_2022,
+    MAX(CASE WHEN year=2023 THEN is_declining_ad_revenue   END) AS ad_down_2023,
+    MAX(CASE WHEN year=2024 THEN is_declining_ad_revenue   END) AS ad_down_2024
+  FROM flags
+  WHERE year BETWEEN 2020 AND 2024
+  GROUP BY city_name
+),
+
+count AS (
+SELECT
+  city_name,
+
+  /* Print decline counts (Yes / No across 2020–2024) */
+  (CASE WHEN print_down_2020='Yes' THEN 1 ELSE 0 END
+ + CASE WHEN print_down_2021='Yes' THEN 1 ELSE 0 END
+ + CASE WHEN print_down_2022='Yes' THEN 1 ELSE 0 END
+ + CASE WHEN print_down_2023='Yes' THEN 1 ELSE 0 END
+ + CASE WHEN print_down_2024='Yes' THEN 1 ELSE 0 END) AS Years_Print_Declined,
+
+  (CASE WHEN print_down_2020='No' THEN 1 ELSE 0 END
+ + CASE WHEN print_down_2021='No' THEN 1 ELSE 0 END
+ + CASE WHEN print_down_2022='No' THEN 1 ELSE 0 END
+ + CASE WHEN print_down_2023='No' THEN 1 ELSE 0 END
+ + CASE WHEN print_down_2024='No' THEN 1 ELSE 0 END)   AS Years_Print_Grew,
+
+  /* Ad decline counts (Yes / No across 2020–2024) */
+  (CASE WHEN ad_down_2020='Yes' THEN 1 ELSE 0 END
+ + CASE WHEN ad_down_2021='Yes' THEN 1 ELSE 0 END
+ + CASE WHEN ad_down_2022='Yes' THEN 1 ELSE 0 END
+ + CASE WHEN ad_down_2023='Yes' THEN 1 ELSE 0 END
+ + CASE WHEN ad_down_2024='Yes' THEN 1 ELSE 0 END)     AS Years_Ad_Revenue_Declined,
+
+  (CASE WHEN ad_down_2020='No' THEN 1 ELSE 0 END
+ + CASE WHEN ad_down_2021='No' THEN 1 ELSE 0 END
+ + CASE WHEN ad_down_2022='No' THEN 1 ELSE 0 END
+ + CASE WHEN ad_down_2023='No' THEN 1 ELSE 0 END
+ + CASE WHEN ad_down_2024='No' THEN 1 ELSE 0 END)       AS Years_Ad_Revenue_Grew
+
+FROM pivot
+),
+
+combined AS (
+  SELECT
+    city_name,
+    Years_Print_Declined,
+    Years_Print_Grew,
+    Years_Ad_Revenue_Declined,
+    Years_Ad_Revenue_Grew,
+    (Years_Print_Declined + Years_Ad_Revenue_Declined) AS risk_index,
+    (Years_Print_Grew + Years_Ad_Revenue_Grew) AS health_index
+  FROM count
+)
+
+SELECT 
+  city_name,
+  Years_Print_Declined,
+  Years_Ad_Revenue_Declined,
+  risk_index,
+  RANK() OVER (ORDER BY risk_index DESC) AS risk_rank,  -- Higher = riskier
+  health_index,
+  RANK() OVER (ORDER BY health_index DESC) AS health_rank -- Higher = healthier
+FROM combined
+ORDER BY risk_rank;
+
+-- Business Request – 6 : 2021 Readiness vs Pilot Engagement Outlier
+WITH readiness AS (
+  SELECT 
+    c.city,
+    round(avg(r.literacy_rate + r.smartphone_penetration + r.internet_penetration),2) AS readiness_score_2021
+  FROM bharat_herald.fact_city_readiness r
+  JOIN bharat_herald.dim_city c
+    ON c.dim_city_id = r.city_id
+  WHERE year(Date) = 2021
+  GROUP BY c.city),
+engagement AS (
+    SELECT 
+    c.city,
+    SUM(p.users_reached) AS engagement_metric_2021
+  FROM bharat_herald.fact_digital_pilot p
+  JOIN bharat_herald.dim_city c
+    ON c.dim_city_id = p.city_id
+  GROUP BY c.city),
+combined AS ( 
+  SELECT 
+    r.city,
+    r.readiness_score_2021,
+    e.engagement_metric_2021,
+    RANK() OVER (ORDER BY r.readiness_score_2021 DESC) AS readiness_rank_desc,
+    RANK() OVER (ORDER BY e.engagement_metric_2021 ASC) AS engagement_rank_asc
+  FROM readiness r
+  JOIN engagement e 
+  ON e.city=r.city
+  )
+  SELECT city AS city_name,
+  readiness_score_2021,
+  engagement_metric_2021,
+  readiness_rank_desc,
+  engagement_rank_asc,
+  CASE 
+    WHEN readiness_rank_desc <=3 AND engagement_rank_asc<=3 THEN 'Yes' 
+    ELSE 'No' 
+  END AS is_outlier-- 
+FROM combined
+ORDER BY readiness_rank_desc, engagement_rank_asc;
+
