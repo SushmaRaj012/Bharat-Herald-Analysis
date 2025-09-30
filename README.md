@@ -61,3 +61,5 @@ Combines print decline & digital readiness to rank cities by priority for digita
 📱 Digital Gap: High readiness cities (Kanpur, Bhopal) still underperform in engagement → opportunity to act fast.
 
 🚀 Phased Strategy: Prioritize Phase 1 cities with high readiness + high print decline for pilot digital rollouts.
+
+Bharat Herald Power BI Dashboard > https://app.powerbi.com/reportEmbed?reportId=5de17104-aeb2-4ee2-b65b-fd4f7ecbeec1  
