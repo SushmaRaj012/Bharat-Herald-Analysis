@@ -62,4 +62,4 @@ Combines print decline & digital readiness to rank cities by priority for digita
 
 🚀 Phased Strategy: Prioritize Phase 1 cities with high readiness + high print decline for pilot digital rollouts.
 
-Bharat Herald Power BI Dashboard > https://app.powerbi.com/reportEmbed?reportId=5de17104-aeb2-4ee2-b65b-fd4f7ecbeec1  
+Bharat Herald Power BI Dashboard > [https://app.powerbi.com/reportEmbed?reportId=5de17104-aeb2-4ee2-b65b-fd4f7ecbeec1  ](https://app.powerbi.com/view?r=eyJrIjoiMDAxMDA0ZDMtNmRiNi00Zjg1LTk0ODktNWJiNjliNmJhYzRiIiwidCI6ImQ2NTIwNTRhLWNkNzMtNDAyNS05ZTEyLThlY2U0NDVkMDcyOSJ9) 
